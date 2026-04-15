@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local environment and secrets
+backend/.env
+.env
+
+# Local runtime outputs
+*.log
+debug-*.log
+*.db
+backend/artifacts/
+
+# IDE/project metadata
+.cursor/
