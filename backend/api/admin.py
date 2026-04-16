@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from backend.core.database import get_db
 from backend.models.schema import Crop, PriceData
+from backend.services.agmarknet_client import get_agmarknet_config_status
 from backend.services.model_service import train_and_save_shock_model
 from backend.services.pipeline_service import get_pipeline_stats, refresh_all_crops_pipeline
 
@@ -45,6 +46,7 @@ def get_status(db: Session = Depends(get_db)):
     stale_count = len([f for f in freshness if (f.get("days_since_update") or 0) > 2])
     return {
         "pipeline": stats,
+        "agmarknet": get_agmarknet_config_status(),
         "freshness": freshness,
         "stale_crops": stale_count,
         "total_crops": len(freshness),

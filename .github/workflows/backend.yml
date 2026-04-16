@@ -1,0 +1,46 @@
+# Verifies backend dependencies install and import on Linux.
+name: Backend
+
+on:
+  push:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend.yml"
+
+jobs:
+  install-and-import:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Placeholder .env for imports
+        run: cp backend/.env.example backend/.env
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip wheel
+          python -m pip install -r backend/requirements.txt
+
+      - name: Import application and Prophet stack
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          DATABASE_URL: sqlite:///./ci_sepm.db
+          AGMARKNET_API_KEY: ""
+        run: |
+          python -c "from backend.main import app; print('FastAPI app:', app.title)"
+          python -c "from prophet import Prophet; import cmdstanpy; print('Prophet + cmdstanpy import ok')"
+          python -c "from backend.services import agmarknet_client, ml_service; print('Services import ok')"

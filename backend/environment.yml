@@ -1,0 +1,15 @@
+# Conda environment for the backend (Prophet + CmdStan via conda-forge cmdstan).
+# Create:    conda env create -f backend/environment.yml
+# Activate: conda activate sepm-crop
+# Repo root: set PYTHONPATH to this project folder, then:
+#   python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+name: sepm-crop
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  # CmdStan binary from conda-forge reduces "Operation not permitted" vs some Store Python installs.
+  - cmdstan
+  - pip:
+    - -r requirements.txt

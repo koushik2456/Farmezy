@@ -9,7 +9,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from backend.core.config import settings
 from backend.core.database import create_all_tables
+from backend.core.stan_logging import silence_cmdstan_loggers
 from backend.api import crops, markets, alerts, admin
+from backend.services.agmarknet_client import log_agmarknet_startup_status
 from backend.services.pipeline_service import refresh_all_crops_pipeline
 
 app = FastAPI(
@@ -31,7 +33,10 @@ app.add_middleware(
 # ----- Startup: ensure all tables exist -----
 @app.on_event("startup")
 def on_startup():
+    silence_cmdstan_loggers()
+
     create_all_tables()
+    log_agmarknet_startup_status()
     if not scheduler.running:
         scheduler.add_job(_scheduled_refresh, "interval", minutes=60, id="hourly_refresh", replace_existing=True)
         scheduler.start()
@@ -51,7 +56,12 @@ def _scheduled_refresh() -> None:
 @app.get("/", tags=["Health"])
 async def root():
     """Health check endpoint."""
-    return {"status": "ok", "message": "Crop Price Prediction API is running."}
+    return {
+        "status": "ok",
+        "message": "Crop Price Prediction API is running.",
+        "docs": "/docs",
+        "hint": "The React UI is separate: in project root run `npm run dev`, then open http://localhost:5173",
+    }
 
 
 # ----- API Routers -----

@@ -1,10 +1,8 @@
 """
-Agmarknet price fetcher.
+Agmarknet price fetcher via data.gov.in Daily Price API.
 
-1) Local scraper (optional): http://127.0.0.1:5000/request?commodity=&state=&market=
-2) data.gov.in Daily Price API (optional): set AGMARKNET_API_KEY in backend/.env
-
-If neither returns data, callers get an empty list (run seeder once DB has history, or set API key).
+Set AGMARKNET_API_KEY (and optionally AGMARKNET_BASE_URL) in backend/.env.
+If the key or URL is missing, fetch_prices returns an empty list.
 """
 
 from __future__ import annotations
@@ -19,9 +17,8 @@ from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-LOCAL_SCRAPER_URL = "http://127.0.0.1:5000/request"
-_local_scraper_logged = False
 _datagov_403_logged = False
+_startup_status_logged = False
 COMMODITY_ALIASES: dict[str, list[str]] = {
     "Rice": ["Paddy(Dhan)(Common)", "Paddy(Dhan)", "Rice"],
     "Cotton": ["Cotton", "Cotton(Capasia)"],
@@ -30,8 +27,44 @@ COMMODITY_ALIASES: dict[str, list[str]] = {
 }
 
 
+def get_agmarknet_config_status() -> dict[str, Any]:
+    """Snapshot for health/admin: whether live price fetch is configured."""
+    key = (settings.AGMARKNET_API_KEY or "").strip()
+    base = (settings.AGMARKNET_BASE_URL or "").strip()
+    return {
+        "source": "data.gov.in",
+        "api_key_configured": bool(key),
+        "base_url_configured": bool(base),
+        "ready": bool(key and base),
+    }
+
+
+def log_agmarknet_startup_status() -> None:
+    """Log once at app startup so operators see Agmarknet configuration without digging."""
+    global _startup_status_logged
+    if _startup_status_logged:
+        return
+    _startup_status_logged = True
+    st = get_agmarknet_config_status()
+    if st["ready"]:
+        logger.info(
+            "Agmarknet: live prices enabled (data.gov.in; key set, base URL set).",
+        )
+    elif not st["api_key_configured"]:
+        logger.warning(
+            "Agmarknet: AGMARKNET_API_KEY is not set — live mandi fetches will return no rows. "
+            "Add your key from https://data.gov.in/ to backend/.env.",
+        )
+    elif not st["base_url_configured"]:
+        logger.warning(
+            "Agmarknet: AGMARKNET_BASE_URL is empty — set it to the dataset resource JSON URL.",
+        )
+    else:
+        logger.warning("Agmarknet: configuration incomplete (check .env).")
+
+
 class AgmarknetRecord:
-    """Parsed record from scraper or normalized data.gov row."""
+    """Parsed record from a normalized data.gov row."""
 
     def __init__(self, raw: dict):
         self.city: str = raw.get("City", "")
@@ -130,43 +163,6 @@ def _commodity_candidates(commodity: str) -> list[str]:
         if v and v not in out:
             out.append(v)
     return out
-
-
-def _fetch_prices_local_scraper(
-    commodity: str, state: str, market: str, timeout: float
-) -> List[AgmarknetRecord]:
-    global _local_scraper_logged
-    params = {"commodity": commodity, "state": state, "market": market}
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            response = client.get(LOCAL_SCRAPER_URL, params=params)
-            response.raise_for_status()
-            raw_list: list = response.json()
-
-        records = [AgmarknetRecord(r) for r in raw_list if isinstance(r, dict)]
-        logger.info(
-            "Agmarknet local: %d records for %s @ %s, %s",
-            len(records), commodity, market, state,
-        )
-        return records
-
-    except httpx.ConnectError:
-        if not _local_scraper_logged:
-            logger.warning(
-                "Local Agmarknet scraper not reachable at %s — "
-                "set AGMARKNET_API_KEY in backend/.env to use data.gov.in, or start your scraper.",
-                LOCAL_SCRAPER_URL,
-            )
-            _local_scraper_logged = True
-        else:
-            logger.debug("Local Agmarknet scraper still unreachable")
-        return []
-    except httpx.HTTPStatusError as exc:
-        logger.error("Local Agmarknet HTTP %s for %s", exc.response.status_code, params)
-        return []
-    except Exception as exc:
-        logger.exception("Local Agmarknet error: %s", exc)
-        return []
 
 
 def _fetch_prices_datagov(
@@ -333,12 +329,8 @@ def fetch_prices(
     timeout: float = 10.0,
 ) -> List[AgmarknetRecord]:
     """
-    Try local scraper first, then data.gov.in (if API key configured).
+    Fetch mandi prices from data.gov.in when AGMARKNET_API_KEY is set.
     """
-    local = _fetch_prices_local_scraper(commodity, state, market, timeout=timeout)
-    if local:
-        return local
-
     for commodity_candidate in _commodity_candidates(commodity):
         gov = _fetch_prices_datagov(commodity_candidate, state, market, timeout=max(timeout, 25.0))
         if gov:

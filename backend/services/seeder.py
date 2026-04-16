@@ -4,7 +4,7 @@ Seeds the PostgreSQL database with:
   1. Crops from mockData.ts (as starting point)
   2. Markets from mockData.ts
   3. Alerts from mockData.ts
-  4. Historical PriceData pulled live from the Agmarknet local scraper
+  4. Historical PriceData pulled live from data.gov.in (AGMARKNET_API_KEY in .env)
 
 Run: python -m backend.services.seeder
 """
@@ -21,7 +21,7 @@ from backend.core.database import SessionLocal, create_all_tables
 from backend.models.schema import Crop, Market, Alert, PriceData, RiskLevel, Trend
 from backend.services.agmarknet_client import fetch_prices
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # ── Seed Data (mirrors app/data/mockData.ts) ──────────────────────────────────
@@ -134,8 +134,8 @@ def seed_alerts(db, crop_map: dict, market_map: dict) -> None:
 
 def seed_price_history(db, crop_map: dict) -> None:
     """
-    Fetch real historical prices from the Agmarknet local scraper and insert into price_data.
-    Falls back gracefully if the scraper is not running.
+    Fetch real historical prices from data.gov.in and insert into price_data.
+    Skips crops when the API returns no rows (check AGMARKNET_API_KEY and network).
     """
     for crop_name, state, city in AGMARKNET_FETCH_CONFIG:
         crop_id = crop_map.get(crop_name)

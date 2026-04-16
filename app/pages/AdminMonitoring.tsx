@@ -70,7 +70,7 @@ export default function AdminMonitoring() {
           <div>
             <p className="font-semibold">Who should use this page?</p>
             <p className="mt-1">
-              Someone who can run the backend, fix API/scraper issues, and occasionally retrain the model after enough
+              Someone who can run the backend, fix data.gov.in API issues, and occasionally retrain the model after enough
               new price rows exist. Farmers use <strong>Dashboard</strong>, <strong>Crops</strong>,{" "}
               <strong>Compare</strong>, and <strong>Alerts</strong> instead.
             </p>

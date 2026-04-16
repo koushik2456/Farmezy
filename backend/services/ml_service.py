@@ -19,12 +19,47 @@ import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from backend.core.stan_logging import silence_cmdstan_loggers
 from backend.models.schema import Crop, PriceData, RiskLevel
 from backend.services.model_service import load_shock_model
 
 logger = logging.getLogger(__name__)
 _SHOCK_MODEL = None
 _PROPHET_IMPORT_ERROR: Optional[str] = None
+_PROPHET_CLASS: Optional[type] = None
+_PROPHET_RUNTIME_DISABLED: bool = False
+_PROPHET_RUNTIME_LOGGED: bool = False
+
+silence_cmdstan_loggers()
+
+
+def _short_exc(exc: Exception, limit: int = 220) -> str:
+    s = str(exc).replace("\n", " ").strip()
+    return s if len(s) <= limit else s[: limit - 3] + "..."
+
+
+def _get_prophet_class():
+    """Lazy import; on failure cache message so we do not retry import every crop."""
+    global _PROPHET_CLASS, _PROPHET_IMPORT_ERROR
+    if _PROPHET_IMPORT_ERROR is not None:
+        return None
+    if _PROPHET_CLASS is not None:
+        return _PROPHET_CLASS
+    try:
+        silence_cmdstan_loggers()
+        from prophet import Prophet  # type: ignore[import-untyped]
+
+        silence_cmdstan_loggers()
+
+        _PROPHET_CLASS = Prophet
+        return _PROPHET_CLASS
+    except Exception as exc:
+        _PROPHET_IMPORT_ERROR = str(exc)
+        logger.warning(
+            "ML forecasts: Prophet import failed (%s). Using linear extrapolation for all crops.",
+            _short_exc(exc),
+        )
+        return None
 
 
 # ── Helper: Load Historical Price DataFrame ────────────────────────────────────
@@ -70,22 +105,31 @@ def forecast_prices(
     df = _load_price_df(crop_id, db)
 
     if len(df) < 10:
-        logger.warning("Crop %d has only %d price records — using linear fallback", crop_id, len(df))
+        logger.info(
+            "ML forecast crop %d: %d historical rows (<10) — linear extrapolation",
+            crop_id,
+            len(df),
+        )
         return _linear_forecast_fallback(crop_id, df, horizon_days)
 
-    global _PROPHET_IMPORT_ERROR
-    if _PROPHET_IMPORT_ERROR:
+    Prophet = _get_prophet_class()
+    if Prophet is None:
+        return _linear_forecast_fallback(crop_id, df, horizon_days)
+
+    global _PROPHET_RUNTIME_DISABLED, _PROPHET_RUNTIME_LOGGED
+    if _PROPHET_RUNTIME_DISABLED:
+        logger.debug("ML forecast crop %d: Prophet skipped (optimizer failed earlier this process)", crop_id)
         return _linear_forecast_fallback(crop_id, df, horizon_days)
 
     try:
-        from prophet import Prophet  # Import lazily to avoid startup cost
-
+        silence_cmdstan_loggers()
         model = Prophet(
             daily_seasonality=False,
             weekly_seasonality=True,
             yearly_seasonality=True,
             interval_width=0.80,
         )
+        silence_cmdstan_loggers()
         model.fit(df)
 
         future = model.make_future_dataframe(periods=horizon_days)
@@ -101,17 +145,21 @@ def forecast_prices(
                 "shock_probability": None,  # Filled by XGBoost below
             })
 
-        logger.info("Prophet forecast complete for crop %d (%d periods)", crop_id, horizon_days)
+        logger.info("ML forecast crop %d: Prophet OK (%d days ahead)", crop_id, horizon_days)
         return results
 
     except Exception as exc:
-        err = str(exc)
-        if _PROPHET_IMPORT_ERROR is None:
-            _PROPHET_IMPORT_ERROR = err
+        _PROPHET_RUNTIME_DISABLED = True
+        if not _PROPHET_RUNTIME_LOGGED:
+            _PROPHET_RUNTIME_LOGGED = True
             logger.warning(
-                "Prophet unavailable in this runtime (%s). Using linear fallback forecasts.",
-                err,
+                "ML forecasts: Prophet optimizer failed (%s). "
+                "On Windows this is often antivirus blocking the Stan binary, or bad/NaN inputs. "
+                "Using linear extrapolation for all crops until restart.",
+                _short_exc(exc),
             )
+        else:
+            logger.debug("ML forecast crop %d: linear fallback (Prophet disabled)", crop_id)
         return _linear_forecast_fallback(crop_id, df, horizon_days)
 
 
