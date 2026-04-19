@@ -110,9 +110,15 @@ export interface Alert {
 // ── Generic Fetch Helper ──────────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  // Only set JSON Content-Type when there is a body. Sending it on GET triggers a CORS
+  // preflight (OPTIONS); mismatched localhost vs 127.0.0.1 then breaks the dashboard.
+  const headers = new Headers(options?.headers);
+  if (options?.body != null && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const response = await fetch(`${BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers,
   });
   if (!response.ok) {
     const error = await response.text();
@@ -180,3 +186,7 @@ export const refreshAllCrops = (): Promise<{ message: string }> =>
 
 export const trainShockModel = (): Promise<Record<string, unknown>> =>
   apiFetch<Record<string, unknown>>("/api/admin/train-shock-model", { method: "POST" });
+
+/** Sync Agmarknet fetch for all crops + retrain shock model (long-running; for ops). */
+export const syncIngestAndTrain = (): Promise<Record<string, unknown>> =>
+  apiFetch<Record<string, unknown>>("/api/admin/sync-ingest-and-train", { method: "POST" });

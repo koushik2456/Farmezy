@@ -7,9 +7,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from backend.core.config import settings
+from backend.core.config import CORS_ALLOW_ORIGINS, settings
 from backend.core.database import create_all_tables
-from backend.core.stan_logging import silence_cmdstan_loggers
 from backend.api import crops, markets, alerts, admin
 from backend.services.agmarknet_client import log_agmarknet_startup_status
 from backend.services.pipeline_service import refresh_all_crops_pipeline
@@ -24,7 +23,7 @@ scheduler = BackgroundScheduler()
 # ----- CORS Middleware -----
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_ORIGIN],
+    allow_origins=CORS_ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,8 +32,6 @@ app.add_middleware(
 # ----- Startup: ensure all tables exist -----
 @app.on_event("startup")
 def on_startup():
-    silence_cmdstan_loggers()
-
     create_all_tables()
     log_agmarknet_startup_status()
     if not scheduler.running:

@@ -6,25 +6,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Dict, Tuple
+from typing import Dict
 
 from backend.core.database import SessionLocal
 from backend.models.schema import Crop, PriceData
+from backend.data.crop_catalog import CROP_MARKET_MAP
 from backend.services.agmarknet_client import fetch_prices
 from backend.services.ml_service import generate_and_save_forecasts, recompute_crop_risk
 
 logger = logging.getLogger(__name__)
-
-CROP_MARKET_MAP: Dict[str, Tuple[str, str]] = {
-    "Wheat": ("Delhi", "Delhi"),
-    "Rice": ("Tamil Nadu", "Chennai"),
-    "Onion": ("Maharashtra", "Lasalgaon"),
-    "Tomato": ("Maharashtra", "Mumbai"),
-    "Potato": ("Karnataka", "Bangalore"),
-    "Cotton": ("Telangana", "Hyderabad"),
-    "Soybean": ("Maharashtra", "Pune"),
-    "Sugarcane": ("Uttar Pradesh", "Muzaffarnagar"),
-}
 
 PIPELINE_STATS: Dict[str, object] = {
     "total_runs": 0,

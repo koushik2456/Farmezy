@@ -35,12 +35,12 @@ jobs:
           python -m pip install -U pip wheel
           python -m pip install -r backend/requirements.txt
 
-      - name: Import application and Prophet stack
+      - name: Import application and ML stack
         env:
           PYTHONPATH: ${{ github.workspace }}
           DATABASE_URL: sqlite:///./ci_sepm.db
           AGMARKNET_API_KEY: ""
         run: |
           python -c "from backend.main import app; print('FastAPI app:', app.title)"
-          python -c "from prophet import Prophet; import cmdstanpy; print('Prophet + cmdstanpy import ok')"
+          python -c "import sklearn; print('scikit-learn', sklearn.__version__)"
           python -c "from backend.services import agmarknet_client, ml_service; print('Services import ok')"

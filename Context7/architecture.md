@@ -78,11 +78,10 @@ To move away from mock data, we will integrate a live agricultural API:
 - **Alternative Choice**: **APIFarmer** or **eNAM API** for real-time commodity pricing.
 
 ### Machine Learning Models
-To compute "price trends" and "predicted shocks", the backend will utilize:
-- **Price Forecasting (Next 14 days)**: **Prophet** (by Meta). Highly optimized for time-series forecasting with strong seasonal mapping (perfect for Rabi/Kharif crop seasons).
-- **Price Shock/Risk Detection**: **XGBoost Classifier** or **Isolation Forest** (Anomaly Detection). These models will analyze historical price volatility and external factors (like sudden supply changes) to trigger "high risk" crop alerts.
+To compute "price trends" and "predicted shocks", the backend uses:
+- **Price Forecasting (Next 14 days)**: **scikit-learn Ridge** regression on time + weekly harmonics (no Stan/Prophet; Windows-friendly).
+- **Price Shock/Risk Detection**: **RandomForestClassifier** trained on rolling-window features (with rule-based fallback if not enough data).
 
 ## 7. Missing Inputs (Need User Confirmation)
 - Do you approve using the **Agmarknet API (data.gov.in)** for fetching live mandi prices?
-- Do you approve using **Prophet** for forecasting and **XGBoost/Isolation Forest** for price shock detection?
 - Once confirmed, Claude (Builder) can begin step 1.

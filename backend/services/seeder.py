@@ -19,23 +19,21 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from backend.core.database import SessionLocal, create_all_tables
 from backend.models.schema import Crop, Market, Alert, PriceData, RiskLevel, Trend
-from backend.services.agmarknet_client import fetch_prices
+from backend.data.crop_catalog import build_crops_seed, agmarknet_fetch_pairs
+from backend.services.agmarknet_client import (
+    COMMODITY_ALIASES,
+    AgmarknetRecord,
+    _datagov_row_to_raw_dict,
+    fetch_prices,
+    fetch_unfiltered_records,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # ── Seed Data (mirrors app/data/mockData.ts) ──────────────────────────────────
 
-CROPS_SEED = [
-    {"name": "Wheat",      "name_hindi": "गेहूं",    "current_price": 2150, "risk_level": RiskLevel.low,    "price_change": 2.5,   "predicted_shock": 15, "trend": Trend.up,     "season": "Rabi"},
-    {"name": "Rice",       "name_hindi": "चावल",    "current_price": 3200, "risk_level": RiskLevel.medium, "price_change": -3.2,  "predicted_shock": 45, "trend": Trend.down,   "season": "Kharif"},
-    {"name": "Onion",      "name_hindi": "प्याज",   "current_price": 1800, "risk_level": RiskLevel.high,   "price_change": -12.5, "predicted_shock": 75, "trend": Trend.down,   "season": "Rabi & Kharif"},
-    {"name": "Tomato",     "name_hindi": "टमाटर",   "current_price": 2500, "risk_level": RiskLevel.high,   "price_change": -15.8, "predicted_shock": 82, "trend": Trend.down,   "season": "Kharif"},
-    {"name": "Potato",     "name_hindi": "आलू",     "current_price": 1200, "risk_level": RiskLevel.low,    "price_change": 1.8,   "predicted_shock": 20, "trend": Trend.stable, "season": "Rabi"},
-    {"name": "Cotton",     "name_hindi": "कपास",    "current_price": 6500, "risk_level": RiskLevel.medium, "price_change": -5.5,  "predicted_shock": 50, "trend": Trend.down,   "season": "Kharif"},
-    {"name": "Soybean",    "name_hindi": "सोयाबीन", "current_price": 4200, "risk_level": RiskLevel.low,    "price_change": 3.2,   "predicted_shock": 18, "trend": Trend.up,     "season": "Kharif"},
-    {"name": "Sugarcane",  "name_hindi": "गन्ना",   "current_price": 310,  "risk_level": RiskLevel.low,    "price_change": 0.5,   "predicted_shock": 12, "trend": Trend.stable, "season": "Year-round"},
-]
+CROPS_SEED = build_crops_seed()
 
 MARKETS_SEED = [
     {"name": "Azadpur Mandi",      "state": "Delhi",       "risk_level": RiskLevel.high,   "high_risk_crops": 3, "total_crops": 12, "average_price_change": -8.5},
@@ -46,17 +44,8 @@ MARKETS_SEED = [
     {"name": "Gaddiannaram Market","state": "Telangana",   "risk_level": RiskLevel.low,    "high_risk_crops": 0, "total_crops": 10, "average_price_change": 2.8},
 ]
 
-# Agmarknet live fetch config: (crop_name, state, city)
-AGMARKNET_FETCH_CONFIG = [
-    ("Potato",    "Karnataka",   "Bangalore"),
-    ("Tomato",    "Maharashtra", "Mumbai"),
-    ("Onion",     "Maharashtra", "Lasalgaon"),
-    ("Wheat",     "Delhi",       "Delhi"),
-    ("Rice",      "Tamil Nadu",  "Chennai"),
-    ("Cotton",    "Telangana",   "Hyderabad"),
-    ("Soybean",   "Maharashtra", "Pune"),
-    ("Sugarcane", "Uttar Pradesh", "Muzaffarnagar"),
-]
+# Agmarknet live fetch config: (crop_name, state, city) — full list in crop_catalog
+AGMARKNET_FETCH_CONFIG = agmarknet_fetch_pairs()
 
 
 # ── Seeder Functions ──────────────────────────────────────────────────────────
@@ -176,6 +165,77 @@ def seed_price_history(db, crop_map: dict) -> None:
         logger.info("Seeded %d price records for %s", inserted, crop_name)
 
 
+def _crop_id_for_api_commodity(commodity_from_api: str, name_to_id: dict[str, int]) -> int | None:
+    c = (commodity_from_api or "").strip()
+    if not c:
+        return None
+    cl = c.lower()
+    for name, cid in name_to_id.items():
+        if name.lower() == cl:
+            return cid
+        for alias in COMMODITY_ALIASES.get(name, []):
+            if alias.strip().lower() == cl:
+                return cid
+    return None
+
+
+def seed_price_history_bulk(db) -> None:
+    """
+    Set AGMARKNET_BULK_SEED=1 (and optionally AGMARKNET_BULK_PAGES=2..10) to pull unfiltered
+    dataset pages and insert prices for any row whose commodity matches a crop name or alias.
+    """
+    if os.environ.get("AGMARKNET_BULK_SEED", "").strip().lower() not in ("1", "true", "yes"):
+        return
+    try:
+        pages = int(os.environ.get("AGMARKNET_BULK_PAGES", "1") or "1")
+    except ValueError:
+        pages = 1
+    pages = max(1, min(pages, 10))
+
+    name_to_id = {c.name: c.id for c in db.query(Crop).all()}
+    total_inserted = 0
+    for p in range(pages):
+        offset = p * 1000
+        rows = fetch_unfiltered_records(offset=offset, limit=1000)
+        if not rows:
+            logger.info("Bulk seed: no rows at offset %s", offset)
+            break
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            comm = str(row.get("commodity") or row.get("Commodity") or "").strip()
+            cid = _crop_id_for_api_commodity(comm, name_to_id)
+            if not cid:
+                continue
+            raw = _datagov_row_to_raw_dict(row, comm, "")
+            if not raw:
+                continue
+            rec = AgmarknetRecord(raw)
+            if not rec.date or rec.modal_price <= 0:
+                continue
+            rec_date = rec.date.date()
+            existing = db.query(PriceData).filter(
+                PriceData.crop_id == cid,
+                PriceData.date == rec_date,
+                PriceData.is_forecast == False,
+            ).first()
+            if existing:
+                continue
+            db.add(
+                PriceData(
+                    crop_id=cid,
+                    date=rec_date,
+                    price=rec.modal_price,
+                    predicted=None,
+                    shock_probability=None,
+                    is_forecast=False,
+                )
+            )
+            total_inserted += 1
+        db.commit()
+    logger.info("Bulk seed: inserted %d price rows from unfiltered pages", total_inserted)
+
+
 def run_seed():
     """Main seeder entry point."""
     logger.info("Creating tables if they do not exist...")
@@ -194,6 +254,9 @@ def run_seed():
 
         logger.info("--- Fetching & Seeding Price History from Agmarknet ---")
         seed_price_history(db, crop_map)
+
+        logger.info("--- Optional bulk unfiltered rows (AGMARKNET_BULK_SEED=1) ---")
+        seed_price_history_bulk(db)
 
         logger.info("✅ Database seeding complete.")
     except Exception:

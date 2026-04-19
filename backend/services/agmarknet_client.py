@@ -24,7 +24,80 @@ COMMODITY_ALIASES: dict[str, list[str]] = {
     "Cotton": ["Cotton", "Cotton(Capasia)"],
     "Soybean": ["Soyabean", "Soyabean Yellow", "Soybean"],
     "Sugarcane": ["Sugar Cane", "Sugarcane", "Gur(Sugar)"],
+    "Bhindi": ["Bhindi(Lady finger)", "Bhindi"],
+    "Bitter Gourd": ["Bitter gourd", "Bitter Gourd"],
+    "Bottle Gourd": ["Bottle Gourd", "Bottle gourd"],
+    "Ridge Gourd": ["Ridge gourd", "Ridge Gourd"],
+    "Green Chilli": ["Green Chilli", "Green Chilly"],
+    "Coriander": ["Coriander(Leaves)", "Coriander"],
+    "Peas": ["Peas(Wet)", "Peas(Dry)", "Peas"],
+    "Water Melon": ["Water Melon", "Watermelon"],
+    "Mango": ["Mango(Raw)", "Mango"],
 }
+
+
+def _datagov_auth_attempts(api_key: str) -> list[tuple[dict[str, str], dict[str, str]]]:
+    """
+    Daily Price API on api.data.gov.in returns HTTP 400 if the key is not in the query string;
+    Bearer-only attempts only add noise. Prefer query api-key first, then header fallbacks.
+    """
+    k = api_key.strip()
+    return [
+        ({}, {"api-key": k}),
+        ({}, {"api_key": k}),
+        ({"Authorization": f"Bearer {k}"}, {"api-key": k}),
+        ({"Authorization": f"Bearer {k}"}, {}),
+        ({"Authorization": k}, {}),
+    ]
+
+
+def _merge_params(base: dict[str, Any], auth_extra: dict[str, str]) -> dict[str, Any]:
+    out = dict(base)
+    for key, val in auth_extra.items():
+        out[key] = val
+    return out
+
+
+def _datagov_get(
+    client: httpx.Client,
+    url: str,
+    params_without_key: dict[str, Any],
+    api_key: str,
+) -> tuple[httpx.Response | None, str]:
+    """
+    Try GET with each auth style. Returns (response, error_snippet).
+    Success = HTTP 200 and JSON with `records` key (list, possibly empty).
+    """
+    last_resp: httpx.Response | None = None
+    last_err = ""
+    for headers, auth_params in _datagov_auth_attempts(api_key):
+        merged = _merge_params(params_without_key, auth_params)
+        try:
+            r = client.get(url, params=merged, headers=headers)
+            last_resp = r
+            if r.status_code == 429:
+                return r, "HTTP 429 Too Many Requests"
+            if r.status_code != 200:
+                last_err = (r.text or "")[:300]
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                last_err = "invalid json"
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("error"):
+                err = str(data.get("error", ""))
+                last_err = err[:300]
+                # try next auth style
+                continue
+            if "records" in data:
+                return r, ""
+        except Exception as exc:
+            last_err = str(exc)[:300]
+            continue
+    return last_resp, last_err or "no successful auth style"
 
 
 def get_agmarknet_config_status() -> dict[str, Any]:
@@ -176,11 +249,8 @@ def _fetch_prices_datagov(
     base = (settings.AGMARKNET_BASE_URL or "").strip().rstrip("/")
     if not base:
         return []
-    # data.gov.in resource endpoints may work as /resource/<id> (preferred),
-    # while some docs/examples mention /resource/<id>.json. Try both.
+    # Single URL: format=json is already in params; .../resource/<uuid>.json returns 400 on this API.
     url_variants: list[str] = [base]
-    if not base.endswith(".json"):
-        url_variants.append(f"{base}.json")
 
     params_base: dict[str, Any] = {
         "limit": 1000,
@@ -190,12 +260,9 @@ def _fetch_prices_datagov(
     }
 
     # Try strict filters first; if no rows, fall back to commodity-only query.
-    query_variants: list[dict[str, Any]] = [{**params_base, "filters[state]": state}, params_base]
-
-    # data.gov.in historically uses `api-key`; some clients/docs use `api_key`. Try both.
-    auth_variants: list[tuple[str, str]] = [
-        ("api-key", key),
-        ("api_key", key),
+    query_variants: list[dict[str, Any]] = [
+        {**params_base, "filters[state]": state},
+        dict(params_base),
     ]
 
     body: dict | None = None
@@ -207,46 +274,43 @@ def _fetch_prices_datagov(
     with httpx.Client(timeout=timeout) as client:
         for query in query_variants:
             for url in url_variants:
-                for auth_key, auth_value in auth_variants:
-                    params = {**query, auth_key: auth_value}
-                    try:
-                        response = client.get(url, params=params)
-                    except httpx.TimeoutException as exc:
-                        saw_timeout = True
-                        last_snippet = str(exc)[:400]
-                        continue
-                    except Exception as exc:
-                        last_snippet = str(exc)[:400]
-                        continue
+                try:
+                    response, err = _datagov_get(client, url, query, key)
+                except httpx.TimeoutException as exc:
+                    saw_timeout = True
+                    last_snippet = str(exc)[:400]
+                    continue
+                except Exception as exc:
+                    last_snippet = str(exc)[:400]
+                    continue
 
-                    last_status = response.status_code
-                    text = (response.text or "")[:400]
-                    last_snippet = text
-                    if response.status_code == 403:
-                        continue
-                    try:
-                        response.raise_for_status()
-                    except httpx.HTTPStatusError:
-                        continue
-                    try:
-                        parsed = response.json()
-                    except Exception:
-                        continue
-                    if isinstance(parsed, dict) and parsed.get("error"):
-                        # Some error payloads still return 200
-                        last_snippet = str(parsed.get("error", parsed))[:400]
-                        continue
+                if response is None:
+                    last_snippet = err[:400] if err else last_snippet
+                    continue
 
-                    records_raw = parsed.get("records") if isinstance(parsed, dict) else None
-                    if isinstance(records_raw, list) and records_raw:
+                last_status = response.status_code
+                if response.status_code == 403:
+                    last_snippet = (response.text or "")[:400]
+                    continue
+                if response.status_code != 200:
+                    last_snippet = (response.text or "")[:400]
+                    continue
+                try:
+                    parsed = response.json()
+                except Exception:
+                    continue
+                if isinstance(parsed, dict) and parsed.get("error"):
+                    last_snippet = str(parsed.get("error", parsed))[:400]
+                    continue
+
+                records_raw = parsed.get("records") if isinstance(parsed, dict) else None
+                if isinstance(records_raw, list):
+                    if records_raw:
                         body = parsed
                         break
-                    if isinstance(records_raw, list):
-                        # Valid response but no rows for this query variant.
-                        saw_valid_empty = True
-                        body = parsed
-                        continue
-                if body is not None and (body.get("records") or []):
+                    saw_valid_empty = True
+                    body = parsed
+                    # Successful 200 with empty records — do not try alternate URLs for same query
                     break
             if body is not None and (body.get("records") or []):
                 break
@@ -273,6 +337,13 @@ def _fetch_prices_datagov(
                 )
             else:
                 logger.debug("data.gov.in still unauthorised (suppressing repeat warnings)")
+        elif "Authorization" in last_snippet or "authori" in (last_snippet or "").lower():
+            logger.warning(
+                "data.gov.in auth failed (%s). Send your API key in backend/.env as AGMARKNET_API_KEY. "
+                "The client tries Authorization: Bearer <key> and query api-key. Last detail: %s",
+                last_status,
+                last_snippet[:200],
+            )
         else:
             logger.warning(
                 "data.gov.in HTTP %s — check AGMARKNET_API_KEY and resource URL. Body: %s",
@@ -320,6 +391,49 @@ def _fetch_prices_datagov(
     out.sort(key=lambda r: r.date or datetime.min, reverse=True)
     logger.info("data.gov.in: %d usable records for %s / %s", len(out), commodity, state)
     return out
+
+
+def fetch_unfiltered_records(
+    offset: int = 0,
+    limit: int = 1000,
+    state: Optional[str] = None,
+    timeout: float = 40.0,
+) -> List[dict]:
+    """
+    Fetch one page of the dataset **without** a commodity filter (many vegetables in one response).
+    Use after AGMARKNET_API_KEY works with Authorization header. Rate limits still apply.
+    """
+    key = (settings.AGMARKNET_API_KEY or "").strip()
+    if not key:
+        return []
+
+    base = (settings.AGMARKNET_BASE_URL or "").strip().rstrip("/")
+    if not base:
+        return []
+
+    url_variants: list[str] = [base]
+
+    params: dict[str, Any] = {
+        "limit": min(limit, 1000),
+        "offset": offset,
+        "format": "json",
+    }
+    if state:
+        params["filters[state]"] = state
+
+    with httpx.Client(timeout=timeout) as client:
+        for url in url_variants:
+            response, _err = _datagov_get(client, url, params, key)
+            if response is None or response.status_code != 200:
+                continue
+            try:
+                data = response.json()
+            except Exception:
+                continue
+            if isinstance(data, dict) and isinstance(data.get("records"), list):
+                raw = data["records"]
+                return [r for r in raw if isinstance(r, dict)]
+    return []
 
 
 def fetch_prices(

@@ -10,20 +10,22 @@ Farmezy is a crop price monitoring and risk analysis platform with:
 
 - Frontend: React, Vite, TypeScript, Tailwind
 - Backend: FastAPI, SQLAlchemy, Pydantic, APScheduler
-- ML: Prophet, scikit-learn, XGBoost
+- ML: scikit-learn (Ridge + weekly seasonality for price curves; RandomForest for shock probability)
 
 ## Project Structure
 
 - `app/` - frontend application
 - `backend/` - API, data services, and ML logic
 - `styles/` - shared styling assets
-- `run-dev.ps1` - local development launcher
+- `run-dev.ps1` / `run-den.ps1` - local development launcher (same script; `run-den` is a typo-friendly alias)
 
 ## Run Locally
 
 1. Install Node and Python dependencies.
 2. Copy `backend/.env.example` to `backend/.env` and set `DATABASE_URL`, `AGMARKNET_API_KEY`, and `FRONTEND_ORIGIN` as needed.
-3. Start development stack:
+3. Start development stack.
+
+**Windows PowerShell** does not run scripts from the current folder unless you prefix them with `.\`. Use **`.\run-dev.ps1`** (not `run-dev.ps1`). Alternatively run **`run-dev.cmd`** from the same folder, or double-click `run-dev.cmd` in File Explorer.
 
 ```powershell
 .\run-dev.ps1 -SeedData:$false -TrainModel:$false -OpenBrowser:$false -InstallDeps:$false
@@ -31,9 +33,9 @@ Farmezy is a crop price monitoring and risk analysis platform with:
 
 Frontend runs on `http://localhost:5173` and backend on `http://localhost:8000`.
 
-## Backend with Conda (recommended — Prophet / CmdStan)
+## Backend with Conda (optional)
 
-Prophet uses CmdStan. On Windows, **Store Python + plain pip** often hits `Operation not permitted` on Stan binaries. Use **Conda** with `backend/environment.yml`: it pulls **cmdstan** from conda-forge and installs the rest via pip.
+You can use a plain **venv + pip** (`python -m venv .venv` then `pip install -r backend/requirements.txt`). **Conda** is optional; `backend/environment.yml` only pins Python 3.11 and installs the same `requirements.txt` — no Stan or Prophet.
 
 ### 1. Install Conda
 
@@ -89,16 +91,6 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 Open `http://127.0.0.1:8000/docs`.
-
-### 7. If Prophet still cannot find Stan
-
-With `conda activate sepm-crop`, note `CONDA_PREFIX` (e.g. `echo %CONDA_PREFIX%` in cmd). Add to `backend/.env` a line like (path varies slightly by install):
-
-```env
-CMDSTAN=C:\Users\YOU\miniconda3\envs\sepm-crop\Library\lib\cmdstan
-```
-
-Use the folder that actually contains the CmdStan install (search under `%CONDA_PREFIX%` for a directory named `cmdstan` if needed). Restart uvicorn after saving.
 
 ### Git / CI
 

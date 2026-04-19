@@ -44,6 +44,32 @@ export default function Dashboard() {
     return <div className="p-8 text-center text-gray-500">Loading live market data...</div>;
   }
 
+  if (crops.length === 0 && markets.length === 0) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-16 text-center">
+        <h1 className="text-xl font-semibold text-gray-900 mb-2">No data from the API</h1>
+        <p className="text-gray-600 mb-4">
+          The backend returned no crops or markets. Usually this is a browser/API connection issue (CORS) or an empty
+          database.
+        </p>
+        <ul className="text-left text-sm text-gray-700 space-y-2 bg-amber-50 border border-amber-200 rounded-lg p-4">
+          <li>
+            <strong>Open this app at</strong> <code className="bg-white px-1 rounded">http://localhost:5173</code> — if you
+            use <code className="bg-white px-1 rounded">127.0.0.1</code> only, refresh using <strong>localhost</strong> after
+            updating the app, or ensure the backend allows both (current default).
+          </li>
+          <li>
+            <strong>Restart the backend</strong> after code changes, then hard-refresh the page (Ctrl+Shift+R).
+          </li>
+          <li>
+            Run <code className="bg-white px-1 rounded">.\run-dev.ps1</code> once with seeding enabled so SQLite has crop
+            rows.
+          </li>
+        </ul>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Header */}

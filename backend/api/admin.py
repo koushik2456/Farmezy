@@ -62,3 +62,17 @@ def refresh_all(background_tasks: BackgroundTasks):
 @router.post("/train-shock-model", summary="Train and persist shock model")
 def train_shock_model(db: Session = Depends(get_db)):
     return train_and_save_shock_model(db)
+
+
+@router.post(
+    "/sync-ingest-and-train",
+    summary="Fetch mandi data for all crops, refresh ML forecasts, then train shock model",
+)
+def sync_ingest_and_train(db: Session = Depends(get_db)):
+    """
+    Runs synchronously (intended for local scripts): full Agmarknet refresh for every crop,
+    then retrains the RandomForest shock classifier. Can take several minutes.
+    """
+    summary = refresh_all_crops_pipeline()
+    train_result = train_and_save_shock_model(db)
+    return {"ingestion": summary, "training": train_result}

@@ -1,8 +1,8 @@
 """
-ML Service: Price Forecasting (Prophet) + Shock Detection (XGBoost / Isolation Forest).
+ML Service: Price forecasting (sklearn Ridge + seasonality) + shock probability (RandomForest / rules).
 
 Key functions:
-  - forecast_prices(crop_id, db) → list of PriceData rows (14-day forecast)
+  - forecast_prices(crop_id, db) → list of dicts (14-day forecast)
   - compute_shock_probability(crop_id, db) → float (0-100)
   - recompute_crop_risk(crop_id, db) → updates crop.risk_level + crop.predicted_shock
 
@@ -13,24 +13,18 @@ These are called:
 
 import logging
 from datetime import date, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import Ridge
 from sqlalchemy.orm import Session
 
-from backend.core.stan_logging import silence_cmdstan_loggers
 from backend.models.schema import Crop, PriceData, RiskLevel
 from backend.services.model_service import load_shock_model
 
 logger = logging.getLogger(__name__)
 _SHOCK_MODEL = None
-_PROPHET_IMPORT_ERROR: Optional[str] = None
-_PROPHET_CLASS: Optional[type] = None
-_PROPHET_RUNTIME_DISABLED: bool = False
-_PROPHET_RUNTIME_LOGGED: bool = False
-
-silence_cmdstan_loggers()
 
 
 def _short_exc(exc: Exception, limit: int = 220) -> str:
@@ -38,36 +32,12 @@ def _short_exc(exc: Exception, limit: int = 220) -> str:
     return s if len(s) <= limit else s[: limit - 3] + "..."
 
 
-def _get_prophet_class():
-    """Lazy import; on failure cache message so we do not retry import every crop."""
-    global _PROPHET_CLASS, _PROPHET_IMPORT_ERROR
-    if _PROPHET_IMPORT_ERROR is not None:
-        return None
-    if _PROPHET_CLASS is not None:
-        return _PROPHET_CLASS
-    try:
-        silence_cmdstan_loggers()
-        from prophet import Prophet  # type: ignore[import-untyped]
-
-        silence_cmdstan_loggers()
-
-        _PROPHET_CLASS = Prophet
-        return _PROPHET_CLASS
-    except Exception as exc:
-        _PROPHET_IMPORT_ERROR = str(exc)
-        logger.warning(
-            "ML forecasts: Prophet import failed (%s). Using linear extrapolation for all crops.",
-            _short_exc(exc),
-        )
-        return None
-
-
 # ── Helper: Load Historical Price DataFrame ────────────────────────────────────
 
 def _load_price_df(crop_id: int, db: Session, days: int = 90) -> pd.DataFrame:
     """
     Load the last `days` of historical price records for a crop from the DB.
-    Returns a DataFrame with columns [ds, y] (Prophet convention).
+    Returns a DataFrame with columns [ds, y].
     """
     cutoff = date.today() - timedelta(days=days)
     rows = (
@@ -91,16 +61,28 @@ def _load_price_df(crop_id: int, db: Session, days: int = 90) -> pd.DataFrame:
     return df
 
 
-# ── Prophet Forecasting ────────────────────────────────────────────────────────
+def _features_time(t: np.ndarray) -> np.ndarray:
+    """Trend + weak weekly seasonality (mandi-style weekly rhythm), no external deps."""
+    t = t.astype(float)
+    return np.column_stack(
+        [
+            t,
+            t**2,
+            np.sin(2.0 * np.pi * t / 7.0),
+            np.cos(2.0 * np.pi * t / 7.0),
+        ]
+    )
+
+
+# ── Sklearn forecasting (Windows-safe, no Stan) ───────────────────────────────
 
 def forecast_prices(
     crop_id: int, db: Session, horizon_days: int = 14
 ) -> List[dict]:
     """
-    Generate a `horizon_days`-day price forecast using Prophet.
-
-    Returns a list of dicts with keys: date, predicted, shock_probability.
-    Falls back to a linear extrapolation if Prophet fails or data is insufficient.
+    Generate a `horizon_days`-day price forecast using Ridge regression on
+    time features (trend + weekly harmonics). Falls back to linear extrapolation
+    if data is thin or the regressor fails.
     """
     df = _load_price_df(crop_id, db)
 
@@ -112,70 +94,61 @@ def forecast_prices(
         )
         return _linear_forecast_fallback(crop_id, df, horizon_days)
 
-    Prophet = _get_prophet_class()
-    if Prophet is None:
-        return _linear_forecast_fallback(crop_id, df, horizon_days)
-
-    global _PROPHET_RUNTIME_DISABLED, _PROPHET_RUNTIME_LOGGED
-    if _PROPHET_RUNTIME_DISABLED:
-        logger.debug("ML forecast crop %d: Prophet skipped (optimizer failed earlier this process)", crop_id)
-        return _linear_forecast_fallback(crop_id, df, horizon_days)
-
     try:
-        silence_cmdstan_loggers()
-        model = Prophet(
-            daily_seasonality=False,
-            weekly_seasonality=True,
-            yearly_seasonality=True,
-            interval_width=0.80,
-        )
-        silence_cmdstan_loggers()
-        model.fit(df)
+        n = len(df)
+        t = np.arange(n, dtype=float)
+        X = _features_time(t)
+        y = df["y"].values.astype(float)
+        model = Ridge(alpha=2.0)
+        model.fit(X, y)
 
-        future = model.make_future_dataframe(periods=horizon_days)
-        forecast = model.predict(future)
+        last_ts = df["ds"].max()
+        last_d = last_ts.date() if hasattr(last_ts, "date") else date.fromisoformat(str(last_ts)[:10])
 
-        # Only return the future rows
-        future_only = forecast.tail(horizon_days)
         results = []
-        for _, row in future_only.iterrows():
+        for k in range(horizon_days):
+            tn = float(n + k)
+            xf = _features_time(np.array([tn]))
+            pred = float(model.predict(xf)[0])
+            future_date = last_d + timedelta(days=k + 1)
             results.append({
-                "date": row["ds"].date(),
-                "predicted": max(0.0, round(float(row["yhat"]), 2)),
-                "shock_probability": None,  # Filled by XGBoost below
+                "date": future_date,
+                "predicted": max(0.0, round(pred, 2)),
+                "shock_probability": None,
             })
 
-        logger.info("ML forecast crop %d: Prophet OK (%d days ahead)", crop_id, horizon_days)
+        logger.info(
+            "ML forecast crop %d: Ridge+seasonal OK (%d days ahead)",
+            crop_id,
+            horizon_days,
+        )
         return results
 
     except Exception as exc:
-        _PROPHET_RUNTIME_DISABLED = True
-        if not _PROPHET_RUNTIME_LOGGED:
-            _PROPHET_RUNTIME_LOGGED = True
-            logger.warning(
-                "ML forecasts: Prophet optimizer failed (%s). "
-                "On Windows this is often antivirus blocking the Stan binary, or bad/NaN inputs. "
-                "Using linear extrapolation for all crops until restart.",
-                _short_exc(exc),
-            )
-        else:
-            logger.debug("ML forecast crop %d: linear fallback (Prophet disabled)", crop_id)
+        logger.warning(
+            "ML forecast crop %d: Ridge forecast failed (%s). Using linear fallback.",
+            crop_id,
+            _short_exc(exc),
+        )
         return _linear_forecast_fallback(crop_id, df, horizon_days)
 
 
 def _linear_forecast_fallback(crop_id: int, df: pd.DataFrame, horizon: int) -> List[dict]:
-    """Simple linear extrapolation when Prophet cannot run."""
+    """Simple linear extrapolation when the main forecaster cannot run."""
     if df.empty:
         base_price = 1000.0
         slope = 0.0
+        last_d = date.today()
     else:
         prices = df["y"].values.astype(float)
         slope = float(np.polyfit(np.arange(len(prices)), prices, 1)[0]) if len(prices) > 1 else 0.0
         base_price = float(prices[-1])
+        last_ts = df["ds"].max()
+        last_d = last_ts.date() if hasattr(last_ts, "date") else date.fromisoformat(str(last_ts)[:10])
 
     results = []
     for i in range(1, horizon + 1):
-        future_date = date.today() + timedelta(days=i)
+        future_date = last_d + timedelta(days=i)
         results.append({
             "date": future_date,
             "predicted": max(0.0, round(base_price + slope * i, 2)),
@@ -184,17 +157,17 @@ def _linear_forecast_fallback(crop_id: int, df: pd.DataFrame, horizon: int) -> L
     return results
 
 
-# ── XGBoost Shock Probability ─────────────────────────────────────────────────
+# ── Shock probability (trained RandomForest or rule fallback) ─────────────────
 
 def compute_shock_probability(crop_id: int, db: Session) -> float:
     """
-    Compute price shock probability (0-100) using XGBoost features:
+    Compute price shock probability (0-100) using features:
       - Price volatility (std dev over last 30 days)
       - Recent price trend (slope)
       - Number of days since last big drop (>10%)
-      - Predicted price vs current price % change
+      - Window length
 
-    Returns a float in [0, 100].
+    Uses RandomForest `predict_proba` when `shock_model.pkl` exists; else rules.
     """
     df = _load_price_df(crop_id, db, days=60)
 
@@ -230,16 +203,12 @@ def compute_shock_probability(crop_id: int, db: Session) -> float:
 
 def _rule_based_shock(volatility: float, trend_pct: float, days_since_drop: int) -> float:
     """
-    Rule-based shock probability (used as XGBoost proxy until we have labeled training data).
-    Designed to produce similar outputs to a trained XGBoost classifier.
+    Rule-based shock probability (used when no trained classifier is available).
     """
     score = 0.0
-    # High volatility → higher shock risk
     score += min(40.0, volatility * 2)
-    # Strong negative trend → higher risk
     if trend_pct < -0.5:
         score += min(30.0, abs(trend_pct) * 5)
-    # Recent drop increases risk
     if days_since_drop < 7:
         score += 30.0
     elif days_since_drop < 14:
@@ -260,7 +229,7 @@ def _rule_based_shock_from_df(df: pd.DataFrame) -> float:
 def recompute_crop_risk(crop_id: int, db: Session) -> None:
     """
     After new data is fetched, recompute and persist:
-      - crop.predicted_shock (from XGBoost)
+      - crop.predicted_shock (from trained model or rules)
       - crop.risk_level     (derived from shock probability)
       - crop.trend          (derived from recent prices)
       - crop.price_change   (% change over last 7 days)
@@ -321,7 +290,7 @@ def recompute_crop_risk(crop_id: int, db: Session) -> None:
 
 def generate_and_save_forecasts(crop_id: int, db: Session) -> None:
     """
-    Run Prophet forecast + XGBoost shock probabilities and persist to price_data table.
+    Run price forecast + shock probabilities and persist to price_data table.
     Clears old forecasts first to avoid stale predictions.
     """
     # Delete old forecasts for this crop

@@ -1,6 +1,9 @@
 param(
     [bool]$SeedData = $true,
     [bool]$TrainModel = $true,
+    # When true (default), calls POST /api/admin/sync-ingest-and-train (live API fetch + forecasts + RF training).
+    # When false, only POST /api/admin/train-shock-model (faster; assumes DB already has fresh prices).
+    [bool]$FullPipeline = $true,
     [bool]$OpenBrowser = $true,
     [bool]$InstallDeps = $true
 )
@@ -9,6 +12,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $doSeedData = $SeedData
 $doTrainModel = $TrainModel
+$doFullPipeline = $FullPipeline
 $doOpenBrowser = $OpenBrowser
 $doInstallDeps = $InstallDeps
 $debugLogPath = Join-Path $projectRoot "debug-6d7972.log"
@@ -76,6 +80,7 @@ Write-DebugLog -HypothesisId "H1" -Location "run-dev.ps1:init" -Message "launche
     initialPwd = (Get-Location).Path
     seedData = $doSeedData
     trainModel = $doTrainModel
+    fullPipeline = $doFullPipeline
     openBrowser = $doOpenBrowser
 }
 #endregion
@@ -166,13 +171,19 @@ if ($doTrainModel) {
     Write-Host "Waiting for backend to become healthy..." -ForegroundColor Yellow
     if (Wait-ForBackend) {
         try {
-            $trainResult = Invoke-RestMethod -Uri "http://localhost:8000/api/admin/train-shock-model" -Method Post
-            Write-Host "Model train trigger result: $($trainResult | ConvertTo-Json -Compress)" -ForegroundColor Green
+            if ($doFullPipeline) {
+                Write-Host "Running full pipeline (Agmarknet fetch per crop + forecasts + shock model training). This may take a few minutes..." -ForegroundColor Yellow
+                $trainResult = Invoke-RestMethod -Uri "http://localhost:8000/api/admin/sync-ingest-and-train" -Method Post -TimeoutSec 900
+            } else {
+                Write-Host "Training shock model only (no live API refresh)..." -ForegroundColor Yellow
+                $trainResult = Invoke-RestMethod -Uri "http://localhost:8000/api/admin/train-shock-model" -Method Post -TimeoutSec 300
+            }
+            Write-Host "Pipeline result: $($trainResult | ConvertTo-Json -Compress -Depth 6)" -ForegroundColor Green
         } catch {
-            Write-Warning "Backend is up but model training call failed: $($_.Exception.Message)"
+            Write-Warning "Backend is up but pipeline call failed: $($_.Exception.Message)"
         }
     } else {
-        Write-Warning "Backend did not become healthy in time. Skipping model training trigger."
+        Write-Warning "Backend did not become healthy in time. Skipping pipeline/training trigger."
     }
 }
 
